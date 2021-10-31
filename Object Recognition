@@ -1,0 +1,362 @@
+import cv2
+import numpy as np 
+import os
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+from matplotlib import pyplot as plt
+from sklearn import svm
+from sklearn.metrics import confusion_matrix
+from sklearn.metrics import accuracy_score
+
+
+NUMBER_OF_CLUSTERS = 16
+
+def getFiles(train, path):
+    images = []
+    for folder in os.listdir(path):
+        if ".txt" not in folder:
+            for file in  os.listdir(path + "/" + folder):
+                images.append(path + "/" + folder + "/" + file)
+
+    return images
+# Reading annotations from annotations.txt and parsing their classses to
+#dictionary
+def read_annotions(labels, annotations, LABELS_FOLDER, ANNOTATIONS_FOLDER): 
+    
+    with open(LABELS_FOLDER) as file1:
+        for line in file1:
+            labels.append(line) 
+    
+    with open(ANNOTATIONS_FOLDER, "r") as file2:
+        for line in file2.readlines():
+            f_list = line.split()
+            
+            annotationArray = []
+            for x in range(1, 13):
+                annotationArray.append(float(f_list[x]))
+            
+            classArray = []
+            for i in range(12):
+                if annotationArray[i] > -1:
+                    classArray.append(labels[i]);  
+            
+            annotations[f_list[0]] = classArray
+            
+
+def getClassIndex(label, labels):
+    if len(label) != 0:
+        for x in range(12):
+            if label[0] in labels[x]:
+                return x    
+    return -1
+def vstackDescriptors(descriptor_list):
+    descriptors = np.array(descriptor_list[0])
+    for descriptor in descriptor_list[1:]:
+        descriptors = np.vstack((descriptors, descriptor)) 
+
+    return descriptors
+
+def clusterDescriptors(descriptors, numberOfClusters):
+    kmeans = KMeans(n_clusters = numberOfClusters).fit(descriptors)
+    return kmeans
+
+def extractFeatures(kmeans, descriptor_list, image_count, numberOfClusters):
+    im_features = np.array([np.zeros(numberOfClusters) for i in range(image_count)])
+    
+    for i in range(image_count):
+        for j in range(len(descriptor_list[i])):
+            feature = descriptor_list[i][j]
+            feature = feature.reshape(1, 128)
+            idx = kmeans.predict(feature) # predicts the closest feature
+            im_features[i][idx] += 1 #increments the value
+
+    return im_features
+
+def normalizeFeatures(scale, features):
+    return scale.transform(features)
+
+def plotHistogram(im_features, numberOfClusters):
+    x_scalar = np.arange(numberOfClusters)
+    y_scalar = np.array([abs(np.sum(im_features[:,h], dtype=np.int32)) for h in range(numberOfClusters)])
+
+    plt.bar(x_scalar, y_scalar)
+    plt.xlabel("Visual Word Index")
+    plt.ylabel("Frequency")
+    plt.title("Complete Vocabulary Generated")
+    plt.xticks(x_scalar + 0.4, x_scalar)
+    plt.show()
+
+def sliding_window(image, stepSize, windowSize):
+	# slide a window across the image
+	for y in range(0, image.shape[0], stepSize):
+		for x in range(0, image.shape[1], stepSize):
+			# yield the current window
+			yield (x, y, image[y:y + windowSize[1], x:x + windowSize[0]])
+
+
+def trainModel(path, NUMBER_OF_CLUSTERS):
+        
+    labels = [] # class isimleri
+    annotations = {} # {key: jpg ismi value: classları}
+
+    LABELS_FOLDER = "C:/Users/ahmet/OneDrive/Masaüstü/labelmetest/classes.txt"
+    ANNOTATIONS_FOLDER = "C:/Users/ahmet/OneDrive/Masaüstü/labelmetest/train/annotation.txt"
+    
+    read_annotions(labels, annotations, LABELS_FOLDER, ANNOTATIONS_FOLDER)
+    
+    #imagelerin dosya pathlerini içeriyor
+    images = getFiles(True, path)
+    print("Train images path detected.")
+    sift = cv2.SIFT_create()
+    
+    descriptor_list = []
+    train_labels = np.array([])
+    image_count = len(images)
+    
+    i = 0
+    j = 0
+    for image_path in images:
+    
+        #getting image number
+        image_number = image_path.split(".jpg")[0]
+        image_number = image_number.split("/")[3]
+        
+        #Resmin labelını buluyoruz
+        label = annotations[image_number]
+        #Resmin kendi labelının numarasını labellar içerisiniden çekiyoruz
+        classIndex = getClassIndex(label, labels)
+        
+        if classIndex != -1:
+            img = cv2.imread(image_path, 0)
+            
+            if img is not None:
+                kp, des = sift.detectAndCompute(img, None)
+                j = j + 1
+                print(j)
+                if des is not None:
+                    train_labels = np.append(train_labels, classIndex)
+                    i = i + 1
+                    descriptor_list.append(des)
+                    
+    image_count = i
+    
+    descriptors = vstackDescriptors(descriptor_list)
+    print("Vstack process has finished.")
+    
+    kmeans = clusterDescriptors(descriptors, NUMBER_OF_CLUSTERS)
+    print("Clustering descriptors has finished.")
+
+    #sanırım clusterladıktan sonra resimleri yine ayırmamız gerekiyor
+    im_features = extractFeatures(kmeans, descriptor_list, image_count, NUMBER_OF_CLUSTERS)
+    print("Feature extraction has finished.")
+
+    scale = StandardScaler().fit(im_features)        
+    im_features = scale.transform(im_features)
+    print("Normalizing training images has finished.")
+
+    plotHistogram(im_features, NUMBER_OF_CLUSTERS)
+    print("Plotting histogram has finished.")
+    
+    classifier = svm.SVC(kernel="rbf");    
+    classifier.fit(im_features, train_labels)
+    
+    return kmeans, scale, classifier, im_features
+
+def plotConfusionMatrix(y_true, y_pred, classes,
+                          normalize=False,
+                          title=None,
+                          cmap=plt.cm.Blues):
+    if not title:
+        if normalize:
+            title = 'Normalized confusion matrix'
+        else:
+            title = 'Confusion matrix, without normalization'
+
+    cm = confusion_matrix(y_true, y_pred)
+    if normalize:
+        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        print("Normalized confusion matrix")
+    else:
+        print('Confusion matrix, without normalization')
+
+    print(cm)
+
+    fig, ax = plt.subplots()
+    im = ax.imshow(cm, interpolation='nearest', cmap=cmap)
+    ax.figure.colorbar(im, ax=ax)
+    ax.set(xticks=np.arange(cm.shape[1]),
+           yticks=np.arange(cm.shape[0]),
+           xticklabels=classes, yticklabels=classes,
+           title=title,
+           ylabel='True label',
+           xlabel='Predicted label')
+
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right",
+             rotation_mode="anchor")
+
+    fmt = '.2f' if normalize else 'd'
+    thresh = cm.max() / 2.
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            ax.text(j, i, format(cm[i, j], fmt),
+                    ha="center", va="center",
+                    color="white" if cm[i, j] > thresh else "black")
+    fig.tight_layout()
+    return ax
+
+def plotConfusions(true, predictions):
+    np.set_printoptions(precision=2)
+
+    class_names = ["person", "car", "building", "window", "tree", "sign", "door", "bookshelf", "chair" , "table", "keyboard", "head"]
+    plotConfusionMatrix(true, predictions, classes=class_names,
+                      title='Confusion matrix, without normalization')
+
+    plotConfusionMatrix(true, predictions, classes=class_names, normalize=True,
+                      title='Normalized confusion matrix')
+
+    plt.show()
+
+def findAccuracy(test_labels, predict_results):
+    print ('accuracy score: %0.3f' % accuracy_score(test_labels, predict_results))
+
+
+def testModel(path, kmeans, scale, svm, im_features, no_clusters):
+    
+    labels = [] # class isimleri
+    annotations = {} # key: jpg ismi value: classları
+
+    LABELS_FOLDER = "C:/Users/ahmet/OneDrive/Masaüstü/labelmetest/classes.txt"
+    ANNOTATIONS_FOLDER = "C:/Users/ahmet/OneDrive/Masaüstü/labelmetest/test/annotation.txt"
+    
+    read_annotions(labels, annotations, LABELS_FOLDER, ANNOTATIONS_FOLDER)
+    
+    test_images = getFiles(False, path)
+    print("Test images path detected.")
+
+    count = 0
+    descriptor_list = []
+    test_labels = np.array([])
+    sift = cv2.SIFT_create()
+    
+    for image_path in test_images:
+    
+        #getting image number
+        image_number = image_path.split(".jpg")[0]
+        image_number = image_number.split("/")[3]
+    
+        label = annotations[image_number]
+        classIndex = getClassIndex(label, labels)
+    
+        if classIndex != -1:
+            img = cv2.imread(image_path, 0)
+            
+            if img is not None:
+                kp, des = sift.detectAndCompute(img, None)
+                if des is not None:
+                    count += 1
+                    test_labels = np.append(test_labels, classIndex)
+                    descriptor_list.append(des)
+
+    descriptors = vstackDescriptors(descriptor_list)
+
+    test_features = extractFeatures(kmeans, descriptor_list, count, no_clusters)
+
+    test_features = scale.transform(test_features)
+    
+    predict_results = svm.predict(test_features)
+    
+    plotConfusions(test_labels, predict_results)
+    print("Confusion matrixes plotted.")
+
+    findAccuracy(test_labels, predict_results)
+    print("Accuracy calculated.")
+    print("Execution done.")
+    
+    print(predict_results)
+    print(test_labels)
+
+from collections import Counter
+
+def testModel2(path, kmeans, scale, svm, no_clusters):
+    
+    labels = [] # class isimleri
+    annotations = {} # key: jpg ismi value: classları
+
+    LABELS_FOLDER = "C:/Users/ahmet/OneDrive/Masaüstü/labelmetest/classes.txt"
+    ANNOTATIONS_FOLDER = "C:/Users/ahmet/OneDrive/Masaüstü/labelmetest/test/annotation.txt"
+    
+    read_annotions(labels, annotations, LABELS_FOLDER, ANNOTATIONS_FOLDER)
+    
+    test_images = getFiles(False, path)
+    print("Test images path detected.")
+    
+    sift = cv2.SIFT_create()
+    
+
+    count = 0
+    test_labels = np.array([])
+    test_predicts = np.array([])
+    
+    for image_path in test_images: # image path alındı
+    
+        #getting image number
+        image_number = image_path.split(".jpg")[0]
+        image_number = image_number.split("/")[3]
+    
+        label = annotations[image_number] #image label bulundu
+        classIndex = getClassIndex(label, labels) #image label'ın integer versiyonu alındı
+    
+        if classIndex != -1: #eğer labelı varsa
+            
+            img = cv2.imread(image_path, 0) #o zaman image path üzerinden okundu
+            (winW, winH) = (16, 16)
+            
+            if img is not None: # Eğer image okumada sorun yoksa
+                count += 1 # gereksiz gibi duruyor
+                test_labels = np.append(test_labels, classIndex) #test imagelerin
+                                                #labellarının saklandığı numpy array
+                print(count)
+                window_descriptor_list = []
+                
+                for (x, y, window) in sliding_window(img, stepSize=16, windowSize=(winW, winH)):
+                    if window.shape[0] != winH or window.shape[1] != winW:
+                        continue
+                
+                    kp, des = sift.detectAndCompute(window, None)
+                    
+                    if des is not None:
+                        window_descriptor_list.append(des)
+                    
+             
+                windowDescriptors = vstackDescriptors(window_descriptor_list)
+            
+                window_features = extractFeatures(kmeans, window_descriptor_list, len(window_descriptor_list), NUMBER_OF_CLUSTERS)
+                    
+                window_features = scale.transform(im_features)
+                
+                window_predict_results = svm.predict(window_features)
+                
+                values, counts = np.unique(window_predict_results, return_counts=True)
+
+                ind = np.argmax(counts)
+                
+                test_predicts = np.append(test_predicts, values[ind])
+                
+                
+    print("Accuracy için başlıyoruz")
+    findAccuracy(test_labels, test_predicts)
+    print("Accuracy calculated.")
+    print("Execution done.")
+
+
+
+    
+############# *MAIN* ###################
+
+path='labelmetest/train'
+kmeans, scale, classifier, im_features = trainModel(path, NUMBER_OF_CLUSTERS)
+
+path='labelmetest/test'
+#testModel(path, kmeans, scale, classifier, im_features, NUMBER_OF_CLUSTERS)
+
+testModel2(path, kmeans, scale, classifier, NUMBER_OF_CLUSTERS)
